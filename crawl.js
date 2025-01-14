@@ -1,61 +1,65 @@
 const fs = require('fs');
 const axios = require('axios');
 const cheerio = require('cheerio');
- 
 
-const downloadImage = async (url, folder_path) => {
-    //check validility and download image into image folder
+
+const downloadImage = async (url, folder_path, state, max_images) => {
+    if (state.num_images >= max_images) return;
+
     try {
         const response = await axios.get(url, { responseType: 'arraybuffer' });
-        fs.writeFileSync(`${folder_path}/${url.split('/').pop()}`, response.data);
+        const fileName = `${folder_path}/${url.split('/').pop()}`;
+        fs.writeFileSync(fileName, response.data);
+        state.num_images++;
+        console.log(`Downloaded image ${state.num_images}: ${url}`);
     } catch (err) {
-        if(err.response && err.response.status != 404){
+        if (err.response && err.response.status !== 404) {
             console.error(`Failed to download image ${url}:`, err.message);
         }
     }
 };
 
-const crawlImages = async (url, depth, curr_depth, image_folder, ind_data) => {
-    //check if we got to depth
-    if (curr_depth > depth) {
-        return;
-    }
+
+const crawlImages = async (url, depth, curr_depth, image_folder, ind_data, state, max_images) => {
+    if (curr_depth > depth || state.num_images >= max_images) return;
 
     try {
         const response = await axios.get(url);
-        //use cheerio parser get all the html tags
         const $ = cheerio.load(response.data);
-        //go over all img tag, chack validilty and download them into image folder 
-        $('img').each((_, element) => {
+
+        // Process images sequentially
+        const imgElements = $('img').toArray();
+        for (const element of imgElements){
+            if (state.num_images >= max_images) break;
+            
             const img_url = $(element).attr('src');
             if (img_url && !img_url.startsWith('data:')) {
-                const new_url = new URL(img_url, url).href; 
-                downloadImage(new_url, image_folder);
-                ind_data.push({ url: new_url, source: url,deep:curr_depth});
-            }
-        });
-
-        let index = 0;
-        
-        if (curr_depth < depth) {
-            //go over all the link tags, check validility and crawl
-            for (const element of $('a')) {
-                const nextUrl = $(element).attr('href');
-                if (index < 3 && nextUrl && nextUrl.startsWith('http')) {
-                    const updatedData = await crawlImages(nextUrl, depth, curr_depth + 1, image_folder, ind_data);
-                    ind_data = updatedData;  // Merge the results of deeper crawls
-                }
-            index+=1;
+                const new_url = new URL(img_url, url).href;
+                await downloadImage(new_url, image_folder, state, max_images);
+                ind_data.push({ url: new_url, source: url, deep: curr_depth });
             }
         }
-        return ind_data; 
 
+        // Process links sequentially
+        if (curr_depth < depth && state.num_images < max_images) {
+            const linkElements = $('a').toArray();
+            for (const element of linkElements) {
+                if (state.num_images >= max_images) break;
+
+                const nextUrl = $(element).attr('href');
+                if (nextUrl && nextUrl.startsWith('http')) {
+                    await crawlImages(nextUrl, depth, curr_depth + 1, image_folder, ind_data, state, max_images);
+                }
+            }
+        }
     } catch (err) {
         console.error(`Failed to crawl ${url}:`, err.message);
     }
 };
 
-//chack the validility of web address
+
+
+//check the validility of web address
 function isValidUrl(url) {
     if (url === null) return false;
     const regex = /^(https?|ftp):\/\/[^\s/$.?#].[^\s]*$/i;
@@ -65,27 +69,30 @@ function isValidUrl(url) {
 async function main() {
     const start_url = process.argv[2];
     const depth = parseInt(process.argv[3]);
+    const max_images = parseInt(process.argv[4]);
     const images_folder = 'images';
     const ind_data = [];
-    const is_valid =isValidUrl(start_url);
+    const state = { num_images: 0 };
 
-    //check the validility of the arguments provided by the user
-    if (!is_valid || isNaN(depth)||depth<0) {
-        (!is_valid)?console.error(`URL is not valid`):
-            console.error(`please enter a valid depth`);
+    // Validate input
+    if (!isValidUrl(start_url) || isNaN(depth) || depth < 0 || isNaN(max_images) || max_images <= 0) {
+        console.error('Invalid input. Ensure the URL is valid and depth/max_images are positive integers.');
         process.exit(1);
     }
 
-    //create image folder if doesn't exist
+    // Create the images folder if it doesn't exist
     if (!fs.existsSync(images_folder)) {
         fs.mkdirSync(images_folder);
     }
 
-    await crawlImages(start_url, depth, 0, images_folder, ind_data);
+    console.log(`Crawling for a maximum of ${max_images} images.`);
+    await crawlImages(start_url, depth, 0, images_folder, ind_data, state, max_images);
 
-    //create json file name index.json and write the data of photos into it
+    // Save the image metadata to `index.json`
     fs.writeFileSync('index.json', JSON.stringify(ind_data, null, 4));
-    console.log('Done!');
+    console.log(`Done! Downloaded ${state.num_images} images.`);
 }
+
+
 
 main();
