@@ -2,11 +2,16 @@ const fs = require('fs');
 const axios = require('axios');
 const cheerio = require('cheerio');
 
-
 const downloadImage = async (url, folder_path, state, max_images) => {
     if (state.num_images >= max_images) return;
 
     try {
+        const fileExtension = url.split('.').pop().toLowerCase();
+        if (!['png'].includes(fileExtension)) {
+            return;
+        }
+
+
         const response = await axios.get(url, { responseType: 'arraybuffer' });
         const fileName = `${folder_path}/${url.split('/').pop()}`;
         fs.writeFileSync(fileName, response.data);
@@ -19,60 +24,64 @@ const downloadImage = async (url, folder_path, state, max_images) => {
     }
 };
 
+const crawlImages = async (start_url, depth, image_folder, max_images) => {
+    let queue = [{ url: start_url, curr_depth: 0 }];
+    let visited = new Set();
+    let state = { num_images: 0 };
+    let ind_data = [];
 
-const crawlImages = async (url, depth, curr_depth, image_folder, ind_data, state, max_images) => {
-    if (curr_depth > depth || state.num_images >= max_images) return;
+    while (queue.length > 0 && state.num_images < max_images) {
+        let { url, curr_depth } = queue.shift();
+        if (visited.has(url) || curr_depth > depth) continue;
+        visited.add(url);
 
-    try {
-        const response = await axios.get(url);
-        const $ = cheerio.load(response.data);
+        try {
+            const response = await axios.get(url);
+            const $ = cheerio.load(response.data);
 
-        // Process images sequentially
-        const imgElements = $('img').toArray();
-        for (const element of imgElements){
-            if (state.num_images >= max_images) break;
-            
-            const img_url = $(element).attr('src');
-            if (img_url && !img_url.startsWith('data:')) {
-                const new_url = new URL(img_url, url).href;
-                await downloadImage(new_url, image_folder, state, max_images);
-                ind_data.push({ url: new_url, source: url, deep: curr_depth });
-            }
-        }
+            // Process images
+            $('img').each((_, element) => {
+                if (state.num_images >= max_images) return;
 
-        // Process links sequentially
-        if (curr_depth < depth && state.num_images < max_images) {
-            const linkElements = $('a').toArray();
-            for (const element of linkElements) {
-                if (state.num_images >= max_images) break;
-
-                const nextUrl = $(element).attr('href');
-                if (nextUrl && nextUrl.startsWith('http')) {
-                    await crawlImages(nextUrl, depth, curr_depth + 1, image_folder, ind_data, state, max_images);
+                let img_url = $(element).attr('src');
+                if (img_url && !img_url.startsWith('data:')) {
+                    let new_url = new URL(img_url, url).href;
+                    downloadImage(new_url, image_folder, state, max_images);
+                    ind_data.push({ url: new_url, source: url, deep: curr_depth });
                 }
+            });
+
+            // Process links for further crawling
+            if (curr_depth < depth) {
+                $('a').each((_, element) => {
+                    let nextUrl = $(element).attr('href');
+                    if (nextUrl && nextUrl.startsWith('http') && !visited.has(nextUrl)) {
+                        queue.push({ url: nextUrl, curr_depth: curr_depth + 1 });
+                    }
+                });
             }
+        } catch (err) {
+            console.error(`Failed to crawl ${url}:`, err.message);
         }
-    } catch (err) {
-        console.error(`Failed to crawl ${url}:`, err.message);
     }
+
+    // Save metadata
+    fs.writeFileSync('index.json', JSON.stringify(ind_data, null, 4));
+    console.log(`Done! Downloaded ${state.num_images} images.`);
 };
 
-
-
-//check the validility of web address
-function isValidUrl(url) {
-    if (url === null) return false;
+// Validate URL format
+const isValidUrl = (url) => {
+    if (!url) return false;
     const regex = /^(https?|ftp):\/\/[^\s/$.?#].[^\s]*$/i;
     return regex.test(url);
-}
+};
 
 async function main() {
     const start_url = process.argv[2];
     const depth = parseInt(process.argv[3]);
     const max_images = parseInt(process.argv[4]);
     const images_folder = 'images';
-    const ind_data = [];
-    const state = { num_images: 0 };
 
     // Validate input
     if (!isValidUrl(start_url) || isNaN(depth) || depth < 0 || isNaN(max_images) || max_images <= 0) {
@@ -80,19 +89,13 @@ async function main() {
         process.exit(1);
     }
 
-    // Create the images folder if it doesn't exist
+    // Create images folder if it doesn't exist
     if (!fs.existsSync(images_folder)) {
         fs.mkdirSync(images_folder);
     }
 
-    console.log(`Crawling for a maximum of ${max_images} images.`);
-    await crawlImages(start_url, depth, 0, images_folder, ind_data, state, max_images);
-
-    // Save the image metadata to `index.json`
-    fs.writeFileSync('index.json', JSON.stringify(ind_data, null, 4));
-    console.log(`Done! Downloaded ${state.num_images} images.`);
+    console.log(`Starting crawl at ${start_url} for up to ${max_images} images.`);
+    await crawlImages(start_url, depth, images_folder, max_images);
 }
-
-
 
 main();
